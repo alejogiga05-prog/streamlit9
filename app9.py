@@ -2,52 +2,73 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from influxdb_client import InfluxDBClient
-from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Dashboard Industrial", layout="wide")
-
-# ======================================
-# 🔒 Parámetros de conexión desde secrets
-# ======================================
+# --- Parámetros de conexión ---
 INFLUXDB_URL = st.secrets["INFLUXDB_URL"]
 INFLUXDB_TOKEN = st.secrets["INFLUXDB_TOKEN"]
 INFLUXDB_ORG = st.secrets["INFLUXDB_ORG"]
 INFLUXDB_BUCKET = st.secrets["INFLUXDB_BUCKET"]
 
-# ================ FUNCIONES ================
+# --- Inicializar cliente ---
+client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+query_api = client.query_api()
 
-@st.cache_data(ttl=300)  # cache de 5 minutos
-def query_data(measurement, fields, start_date, end_date):
-    """Consulta datos desde InfluxDB y retorna un DataFrame pivotado."""
-    try:
-        client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
-        query_api = client.query_api()
+# --- Configuración lateral ---
+st.sidebar.header("Filtros")
+days = st.sidebar.slider("Rango de tiempo (días)", 1, 30, 3)
 
-        fields_filter = " or ".join([f'r._field == "{f}"' for f in fields])
+st.title(" Tablero de Monitoreo Industrial")
+st.write("Datos de sensores **DHT22** y **MPU6050**")
 
-        query = f'''
-        from(bucket: "{INFLUXDB_BUCKET}")
-          |> range(start: {start_date}, stop: {end_date})
-          |> filter(fn: (r) => r._measurement == "{measurement}")
-          |> filter(fn: (r) => {fields_filter})
-          |> yield(name: "mean")
-        '''
+# --- Función para consultar datos ---
+def query_data(measurement, fields):
+    fields_filter = " or ".join([f'r._field == "{f}"' for f in fields])
+    query = f'''
+    from(bucket: "{INFLUXDB_BUCKET}")
+      |> range(start: -{days}d)
+      |> filter(fn: (r) => r._measurement == "{measurement}")
+      |> filter(fn: (r) => {fields_filter})
+    '''
+    tables = query_api.query(org=INFLUXDB_ORG, query=query)
+    data = []
+    for table in tables:
+        for record in table.records:
+            data.append((record.get_time(), record.get_field(), record.get_value()))
 
-        tables = query_api.query(org=INFLUXDB_ORG, query=query)
-        data = [(record.get_time(), record.get_field(), record.get_value())
-                for table in tables for record in table.records]
-
-        if not data:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(data, columns=["time", "field", "value"])
-        df = df.pivot(index="time", columns="field", values="value").reset_index()
-
-        return df
-
-    except Exception as e:
-        st.error(f"⚠ Error consultando InfluxDB: {e}")
+    if not data:
         return pd.DataFrame()
+    
+    df = pd.DataFrame(data, columns=["time", "field", "value"])
+    df = df.pivot(index="time", columns="field", values="value").reset_index()
+    return df
+
+# --- Sensor DHT22 ---
+st.subheader(" Sensor DHT22 (Temperatura y Humedad)")
+fields_dht = ["temperatura", "humedad", "sensacion_termica"]
+df_dht = query_data("studio-dht22", fields_dht)
+
+if not df_dht.empty:
+    fig_dht = px.line(df_dht, x="time", y=fields_dht, title="Lecturas DHT22")
+    st.plotly_chart(fig_dht, use_container_width=True)
+
+    st.write("**Métricas DHT22**")
+    st.dataframe(df_dht.describe().T[["mean", "min", "max"]])
+else:
+    st.warning("No hay datos disponibles del sensor DHT22 para este rango de tiempo.")
+
+# --- Sensor MPU6050 ---
+st.subheader(" Sensor MPU6050 (Vibraciones y Aceleración)")
+fields_mpu = ["accel_x", "accel_y", "accel_z"]
+df_mpu = query_data("mpu6050", fields_mpu)
+
+if not df_mpu.empty:
+    fig_mpu = px.line(df_mpu, x="time", y=fields_mpu, title="Lecturas MPU6050")
+    st.plotly_chart(fig_mpu, use_container_width=True)
+
+    st.write("**Métricas MPU6050**")
+    st.dataframe(df_mpu.describe().T[["mean", "min", "max"]])
+else:
+    st.warning("No hay datos disponibles del sensor MPU6050 para este rango de tiempo.")
 
 
-# =
+
